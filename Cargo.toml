@@ -1,0 +1,15 @@
+[package]
+name = "minimalist"
+description = "easy-to-use and frequently required api interfaces for various libraries"
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/rogerwq/minimalist"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+thiserror = "1.0"
+ssh2 = "0.9"
+
+[dev-dependencies]
+home = "0.5"
