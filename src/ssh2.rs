@@ -15,10 +15,12 @@ enum Error {
     SessionHandshake(String),
     #[error("Session auth user {0} with private key file {1} error: {2}")]
     SessionUserAuth(String, PathBuf, String),
-    #[error("Create remote file {0} of size {1} error: {2}")]
-    CreateRemoteFile(PathBuf, u64, String),
+    #[error("Create remote file {0} error: {1}")]
+    CreateRemoteFile(PathBuf, String),
     #[error("Write remote file {0} error: {1}")]
     WriteRemoteFile(PathBuf, String),
+    #[error("Execute commands {0} error: {1}")]
+    ExecCommands(String, String),
 }
 
 /// Establishes a new SSH session using the provided IP address, port, username, and private key file path.
@@ -48,7 +50,7 @@ enum Error {
 /// use std::net::IpAddr;
 /// use std::path::Path;
 /// use std::env;
-/// use minimalist::ssh2::create_session;
+/// use minimalist::ssh2::*;
 ///
 /// fn main() -> anyhow::Result<()> {
 ///     let ip: IpAddr = "127.0.0.1".parse().unwrap();
@@ -105,12 +107,11 @@ pub fn create_session(ip: IpAddr, port: u16, username: &str, privatekey: &Path) 
 /// ```rust
 /// use std::net::IpAddr;
 /// use std::path::Path;
-/// use anyhow::Result;
 /// use ssh2::Session;
 /// use std::env;
 /// use minimalist::ssh2::*;
 ///
-/// fn main() -> Result<()> {
+/// fn main() -> anyhow::Result<()> {
 ///     let ip: IpAddr = "127.0.0.1".parse().unwrap();
 ///     let port: u16 = 22;
 ///     let username = env::var("LOCAL_SSH_USERNAME").unwrap();
@@ -120,6 +121,7 @@ pub fn create_session(ip: IpAddr, port: u16, username: &str, privatekey: &Path) 
 ///
 ///     let sess = create_session(ip, port, &username, &privatekey)?;
 ///     write_file(&sess, content, remote_file)?;
+///     run_commands(&sess, &["rm remote_file.txt"])?;
 ///
 ///     Ok(())
 /// }
@@ -129,23 +131,145 @@ pub fn create_session(ip: IpAddr, port: u16, username: &str, privatekey: &Path) 
 ///
 /// This function does not explicitly panic.
 pub fn write_file(sess: &Session, content: &str, remote_file: &Path) -> anyhow::Result<()> {
-    let mut write_channel = sess.scp_send(remote_file, 0o644, content.len() as u64, None)
-        .map_err(|e| Error::CreateRemoteFile(remote_file.into(), content.len() as u64, e.to_string()))?;
-    write_channel.write_all(content.as_bytes())
+    let mut channel = sess.scp_send(remote_file, 0o644, content.len() as u64, None)
+        .map_err(|e| Error::CreateRemoteFile(remote_file.into(), e.to_string()))?;
+    channel.write_all(content.as_bytes())
         .map_err(|e| Error::WriteRemoteFile(remote_file.into(), e.to_string()))?;
-    write_channel.send_eof()?;
-    write_channel.wait_eof()?;
-    write_channel.close()?;
-    write_channel.wait_close()?;
+    channel.send_eof()?;
+    channel.wait_eof()?;
+    channel.close()?;
+    channel.wait_close()?;
     Ok(())
 }
 
-pub fn run_commands(sess: &Session, commands: &[&str]) -> String {
-    let mut channel = sess.channel_session().unwrap();
+/// Reads the contents of a remote file over an SSH session and returns it as a string.
+///
+/// # Arguments
+///
+/// * `sess` - A reference to an established SSH `Session`.
+/// * `remote_file` - A reference to a `Path` representing the location of the remote file to be read.
+///
+/// # Returns
+///
+/// * `Ok(String)` - The contents of the remote file if it is read successfully.
+/// * `Err(anyhow::Error)` - An error containing details if any step of the read process fails.
+///
+/// # Errors
+///
+/// This function will return an error in the following cases:
+///
+/// * If there is an issue initiating the SCP receive session.
+/// * If there is an issue reading the data from the remote file.
+///
+/// The error returned will include context about the specific step that failed.
+///
+/// # Example
+///
+/// ```
+/// use std::net::IpAddr;
+/// use std::path::Path;
+/// use ssh2::Session;
+/// use std::env;
+/// use minimalist::ssh2::*;
+///
+/// fn main() -> anyhow::Result<()> {
+///     let ip: IpAddr = "127.0.0.1".parse().unwrap();
+///     let port: u16 = 22;
+///     let username = env::var("LOCAL_SSH_USERNAME").unwrap();
+///     let privatekey = home::home_dir().unwrap().join(".ssh").join("id_rsa");
+///     let sess = create_session(ip, port, &username, &privatekey)?;
+///
+///     let remote_file = Path::new("remote_file.txt");
+///     let content_written = "This is the file content";
+///     write_file(&sess, content_written, remote_file)?;
+///
+///     let content_read = read_file(&sess, &remote_file)?;
+///     assert_eq!(content_written, content_read);
+///     run_commands(&sess, &["rm remote_file.txt"])?;
+///
+///     Ok(())
+/// }
+/// ```
+///
+/// # Dependencies
+///
+/// This function depends on the `ssh2` crate for managing the SSH session and SCP channel, and `anyhow` crate for error handling.
+///
+/// # Note
+///
+/// * Make sure that the `Session` object is properly authenticated before calling this function.
+/// * The function reads the entire contents of the remote file into a `String`.
+/// * Ensure that the remote file is accessible and readable by the SSH user.
+pub fn read_file(sess: &Session, remote_file: &Path) -> anyhow::Result<String> {
+    let (mut channel, _) = sess.scp_recv(remote_file)
+        .map_err(|e| Error::CreateRemoteFile(remote_file.into(), e.to_string()))?;
+    let mut data = String::new();
+    channel.read_to_string(&mut data)?;
+    Ok(data)
+}
+
+/// Executes a sequence of commands on a remote session and returns the combined output.
+///
+/// # Arguments
+///
+/// * `sess` - A reference to an established SSH `Session`.
+/// * `commands` - A slice of string slices representing the commands to be executed sequentially.
+///
+/// # Returns
+///
+/// * `Ok(String)` - The combined standard output and standard error of the executed commands if they run successfully.
+/// * `Err(anyhow::Error)` - An error containing details if any step of the execution fails.
+///
+/// # Errors
+///
+/// This function will return an error in the following cases:
+///
+/// * If there is an issue creating the channel session.
+/// * If there is an issue executing the commands.
+/// * If there is an issue reading the output from the remote session.
+/// * If there is an issue closing the channel.
+///
+/// The error returned will include context about the specific step that failed.
+///
+/// # Example
+///
+/// ```
+/// use std::net::{IpAddr, TcpStream};
+/// use std::env;
+/// use ssh2::Session;
+/// use minimalist::ssh2::*;
+///
+/// fn main() -> anyhow::Result<()> {
+///     let ip: IpAddr = "127.0.0.1".parse().unwrap();
+///     let port: u16 = 22;
+///     let username = env::var("LOCAL_SSH_USERNAME").unwrap();
+///     let privatekey = home::home_dir().unwrap().join(".ssh").join("id_rsa");
+///     let sess = create_session(ip, port, &username, &privatekey)?;
+///
+///     let commands = ["echo 'Hello, world!'", "uname -a"];
+///     let output = run_commands(&sess, &commands)?;
+///     println!("{}", output);
+///
+///     Ok(())
+/// }
+/// ```
+///
+/// # Dependencies
+///
+/// This function depends on the `ssh2` crate for managing the SSH session and channels, and `anyhow` crate for error handling.
+///
+/// # Note
+///
+/// * Make sure that the `Session` object is properly authenticated before calling this function.
+/// * The commands are joined using a semicolon (`;`), which means they will be executed in sequence within a single shell session.
+/// * The function captures both standard output and standard error combined in the returned string.
+pub fn run_commands(sess: &Session, commands: &[&str]) -> anyhow::Result<String> {
+    let mut channel = sess.channel_session()?;
     let joined_comand = commands.join(";");
-    channel.exec(&joined_comand).unwrap();
+    channel.exec(&joined_comand)
+        .map_err(|e| Error::ExecCommands(joined_comand, e.to_string()))?;
     let mut s = String::new();
-    channel.read_to_string(&mut s).unwrap();
-    channel.wait_close().unwrap();
-    s
+    channel.read_to_string(&mut s)?;
+    channel.wait_close()?;
+    Ok(s)
 }

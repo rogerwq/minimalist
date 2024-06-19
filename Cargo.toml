@@ -9,7 +9,11 @@ license = "MIT"
 [dependencies]
 anyhow = "1.0"
 thiserror = "1.0"
-ssh2 = "0.9"
+ssh2 = { version = "0.9", optional = true }
 
 [dev-dependencies]
 home = "0.5"
+
+[features]
+default = []
+ssh2 = ["dep:ssh2"]
