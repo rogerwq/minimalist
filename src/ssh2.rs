@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, TcpStream};
 use std::path::{Path, PathBuf};
 
-use ssh2::Session;
+pub use ssh2::Session;
 use thiserror::Error as ErrorProcMacro;
 
 #[derive(Debug, ErrorProcMacro)]
